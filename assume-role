@@ -1,7 +1,5 @@
 #!/bin/bash
 
-export user_clean=$(printf '%s' $USER | tr -d '\\')
-
 # START USAGE DOCUMENTATION
 # assume-role is a command line tool to help assume roles through a bastion account with MFA.
 # Store your bastion account credentials here ~/.aws/credentials
@@ -12,11 +10,19 @@ export user_clean=$(printf '%s' $USER | tr -d '\\')
 #                       [default 'default']
 # role                  the role to assume into the account
 #                       [default 'read']
-# mfa_token             The MFA token for the user
+# mfa_token             The MFA token for the user (if available)
 #
 # aws_region            region to assume into default set in ~/.aws/config
 #
 # END USAGE DOCUMENTATION
+
+# Colors
+CYAN='\033[0;36m'
+BLUE='\033[0;34m'
+RED='\033[0;31m'
+YELLOW='\033[0;33m'
+GREEN='\033[0;32m'
+NC='\033[0m' # No Color
 
 echo_out() {
   if [ -z "$silent" ]; then
@@ -26,6 +32,46 @@ echo_out() {
     else
       echo "echo \"$*\";"
     fi
+  fi
+}
+
+eks_menu ()
+  {
+    arrsize=$1
+    # echo "Size of array: $arrsize"
+    # echo_out "${@:2}"
+    select option in "${@:2}"; do
+      if [ "$REPLY" -gt "$arrsize" ];
+      then
+        echo_out "Exiting..."
+        break;
+      elif [ 1 -le "$REPLY" ] && [ "$REPLY" -le $((arrsize)) ];
+      then
+        # echo "You selected $option which is option $REPLY"
+        echo_out "${BLUE}\ufd31 Switch to $option${NC}"
+        export KUBECONFIG="$HOME/.kube/$AWS_ACCOUNT_ID-$option"
+        aws eks update-kubeconfig --name $option --alias $option
+        chmod 0600 $KUBECONFIG
+        break;
+      else
+        echo_out "Incorrect Input: Select a number 1-$arrsize"
+      fi
+    done
+  }
+
+use_okta_auth() {
+  if [ -f -a "$OKTA_CONFIG" ]; then
+    SOURCE_PROFILE=$(aws configure get source_profile --profile $account_name)
+    #echo $SOURCE_PROFILE
+    ESCAPED_PROFILE=$(echo $SOURCE_PROFILE | sed 's;/;\\/;g')
+    is_temporary=`cat $CREDENTIAL_FILE | sed -n "/^\[$ESCAPED_PROFILE\]/,/^\[.*\]/p" | grep "aws_session_token" | wc -l`
+    if [ $is_temporary -eq "1" ]; then
+      return 0
+    else
+      return 1
+    fi
+  else
+    return 1
   fi
 }
 
@@ -91,9 +137,9 @@ EOF
         ;;
       h)
         echo "$HELP"
-        exit 1
+        return
         ;;
-     \?)
+      \?)
         invalid_options+=($OPTARG)
         ;;
      *)
@@ -110,28 +156,24 @@ EOF
     done
     echo "" >&2
     echo "$HELP" >&2
-    exit 1
+    return
   fi
 
   # SET $1 TO FIRST MASS ARGUMENT, $2 TO SECOND MASS ARGUMENT ETC
   shift $((OPTIND - 1))
 
-
-
   account_name_input=$1
 
-
   # DEFAULT VARIABLES
-  ACCOUNTS_FILE=${ACCOUNTS_FILE:-~/.aws/accounts}
   CONF_FILE=${CONF_FILE:-~/.aws/config}
+  CREDENTIAL_FILE="$HOME/.aws/credentials"
+  OKTA_CONFIG=${OKTA_CONFIG:-$HOME/.okta_aws_login_config}
   SESSION_TIMEOUT=43200
   ROLE_SESSION_TIMEOUT=3600
   DEFAULT_ACCOUNT="default"
   DEFAULT_ROLE="read"
-
-  if [ -z  "$AWS_PAGER" ]; then
-    export AWS_PAGER="cat"
-  fi
+  AWS_PAGER=${AWS_PAGER:-cat}
+  default_profile=${AWS_PROFILE_ASSUME_ROLE:-default}
 
   # Force use of ~/.aws/credentials file which contains aws login account
   unset AWS_ACCESS_KEY_ID
@@ -142,14 +184,6 @@ EOF
   #######
   # SETUP
   #######
-
-  # load default assume-role profile if available, use "default" otherwise
-  if [ "$AWS_PROFILE_ASSUME_ROLE" ]; then
-    # echo "Using assume-role default profile: $AWS_PROFILE_ASSUME_ROLE"
-    default_profile=${AWS_PROFILE_ASSUME_ROLE}
-  else
-    default_profile="default"
-  fi
 
   # load user-set ROLE_SESSION_TIMEOUT (up to 12h, 43200 seconds), use default 1h defined above otherwise
   if [ "$AWS_ROLE_SESSION_TIMEOUT" ]; then
@@ -192,16 +226,13 @@ EOF
         role_input=`cat $CONF_FILE | grep "$account_id" | awk '{print $3 }' | awk -F'/' '{ print $2 }'`
         account_name=`tac ~/.aws/config | grep -B 20 "$account_id" | grep "\[profile" | sed "s/\]$//" | awk '{print $2 }' | head -n1`
       else
-        echo_out "Account-ID not found or multiple"
+        echo_out "${RED}Account-ID not found or multiple${NC}"
+        return
       fi
     fi
-   # echo_out $role_input, $account_id
+    # echo_out $role_input, $account_id
   fi
 
-  # set account_id
-  if [ -f "$ACCOUNTS_FILE" ] && [ -z "$account_id" ]; then
-    account_id=$(jq ".[\"$account_name\"]" < "$ACCOUNTS_FILE" | jq --raw-output "select(. != null)")
-  fi
   # If cant find the alias then set the input as the account id
   if [ -z "$account_id" ]; then
     account_id=$account_name
@@ -257,12 +288,12 @@ EOF
     echo_out "region not defined"
     return
   fi
-  AWS_REGION="$region"
-  AWS_DEFAULT_REGION="$region"
+  export AWS_REGION="$region"
+  export AWS_DEFAULT_REGION="$region"
 
   # set external ID
   AWS_CONFIG_EXTERNAL_ID="$(aws configure get external_id --profile ${account_name})"
-  if [ ! -z "$AWS_CONFIG_EXTERNAL_ID" ]; then
+  if [ "$AWS_CONFIG_EXTERNAL_ID" ]; then
     # echo_out "External ID from config $AWS_CONFIG_EXTERNAL_ID"
     external_id="$AWS_CONFIG_EXTERNAL_ID"
   else
@@ -281,110 +312,151 @@ EOF
 
   if [ "$ROLE_SESSION_TIMEOUT" -gt 3600 ] || [ "$ABOUT_SESSION_TIMEOUT" -lt "$SESSION_TIMEOUT_DELTA" ]; then
 
-    # We'll need a token to renew session
-    if [ -z "$mfa_token_input" ] && [ -z "$OUTPUT_TO_EVAL" ] && [ -z "$YUBIKEY_ASSUME_KEY" ]; then
-      echo -n "MFA Token: "
-      read -r mfa_token
-    elif [ -z "$mfa_token_input" ] && [ -z "$OUTPUT_TO_EVAL" ]; then
-      YUBIKEY_MFA=$(ykman oath code "$YUBIKEY_ASSUME_KEY" | awk '{print $NF}')
-      echo_out "Using MFA-Key $YUBIKEY_MFA"
-      mfa_token="$YUBIKEY_MFA"
-    else
-      mfa_token="$mfa_token_input"
-    fi
+    if [ ! use_okta_auth ]; then
 
-    if [ -z "$mfa_token" ]; then
-      echo_out "mfa_token is not defined"
-      return
-    fi
-
-    # get the username attached to your default creds
-    AWS_USERNAME=$(aws iam get-user --query User.UserName --output text --profile $default_profile)
-
-    if [ -z "$mfa_serial" ]; then
-      # get MFA device attached to default creds
-      MFA_DEVICE_ARGS=(--user-name "$AWS_USERNAME")
-      MFA_DEVICE_ARGS+=(--query 'MFADevices[0].SerialNumber')
-      MFA_DEVICE_ARGS+=(--output text)
-      MFA_DEVICE_ARGS+=(--profile "${default_profile}")
-      MFA_DEVICE=$(aws iam list-mfa-devices "${MFA_DEVICE_ARGS[@]}")
-      MFA_DEVICE_STATUS=$?
-
-      if [ $MFA_DEVICE_STATUS -ne 0 ]; then
-        echo_out "aws iam list-mfa-devices error"
-        return
+      # We'll need a token to renew session
+      if [ -z "$mfa_token_input" ] && [ -z "$OUTPUT_TO_EVAL" ] && [ -z "$YUBIKEY_ASSUME_KEY" ]; then
+        echo -n "MFA Token: "
+        read -r mfa_token
+      elif [ -z "$mfa_token_input" ] && [ -z "$OUTPUT_TO_EVAL" ]; then
+        YUBIKEY_MFA=$(ykman oath code "$YUBIKEY_ASSUME_KEY" | awk '{print $NF}')
+        echo_out "Using MFA-Key $YUBIKEY_MFA"
+        mfa_token="$YUBIKEY_MFA"
+      else
+        mfa_token="$mfa_token_input"
       fi
-    else
-      MFA_DEVICE=$mfa_serial
-    fi
 
-    # if session doesn't exist, or is expired
-    if [ "$ABOUT_SESSION_TIMEOUT" -lt "$SESSION_TIMEOUT_DELTA" ] && [ "$ROLE_SESSION_TIMEOUT" -le 3600 ]; then
-
-      # 12 hour MFA w/ Session Token, which can then be reused
-      SESSION_ARGS=(--duration-seconds "$SESSION_TIMEOUT")
-      SESSION_ARGS+=(--serial-number "${MFA_DEVICE}")
-      SESSION_ARGS+=(--token-code "${mfa_token}")
-      SESSION_ARGS+=(--profile "${default_profile}")
-
-      SESSION=$(aws sts get-session-token "${SESSION_ARGS[@]}" --output json)
-      SESSION_STATUS=$?
-
-      if [ $SESSION_STATUS -ne 0 ]; then
-        echo_out "aws sts get-session-token error"
+      if [ -z "$mfa_token" ]; then
+        echo_out "mfa_token is not defined"
         return
       fi
 
-      # Save Primary Credentials
-      AWS_SESSION_START=$NOW
-      AWS_SESSION_ACCESS_KEY_ID=$(echo "$SESSION" | jq -r .Credentials.AccessKeyId)
-      AWS_SESSION_SECRET_ACCESS_KEY=$(echo "$SESSION" | jq -r .Credentials.SecretAccessKey)
-      AWS_SESSION_SESSION_TOKEN=$(echo "$SESSION" | jq -r .Credentials.SessionToken)
-      AWS_SESSION_SECURITY_TOKEN=$AWS_SESSION_SESSION_TOKEN
+      # get the username attached to your default creds
+      AWS_USERNAME=$(aws iam get-user --query User.UserName --output text --profile $default_profile)
+
+      if [ -z "$mfa_serial" ]; then
+        # get MFA device attached to default creds
+        MFA_DEVICE_ARGS=(--user-name "$AWS_USERNAME")
+        MFA_DEVICE_ARGS+=(--query 'MFADevices[0].SerialNumber')
+        MFA_DEVICE_ARGS+=(--output text)
+        MFA_DEVICE_ARGS+=(--profile "${default_profile}")
+        MFA_DEVICE=$(aws iam list-mfa-devices "${MFA_DEVICE_ARGS[@]}")
+        MFA_DEVICE_STATUS=$?
+
+        if [ $MFA_DEVICE_STATUS -ne 0 ]; then
+          echo_out "aws iam list-mfa-devices error"
+          return
+        fi
+      else
+        MFA_DEVICE=$mfa_serial
+      fi
+
+      # if session doesn't exist, or is expired
+      if [ "$ABOUT_SESSION_TIMEOUT" -lt "$SESSION_TIMEOUT_DELTA" ] && [ "$ROLE_SESSION_TIMEOUT" -le 3600 ]; then
+
+        # 12 hour MFA w/ Session Token, which can then be reused
+        SESSION_ARGS=(--duration-seconds "$SESSION_TIMEOUT")
+        SESSION_ARGS+=(--serial-number "${MFA_DEVICE}")
+        SESSION_ARGS+=(--token-code "${mfa_token}")
+        SESSION_ARGS+=(--profile "${default_profile}")
+
+        SESSION=$(aws sts get-session-token "${SESSION_ARGS[@]}" --output json)
+        SESSION_STATUS=$?
+
+        if [ $SESSION_STATUS -ne 0 ]; then
+          echo_out "aws sts get-session-token error"
+          return
+        fi
+
+        # Save Primary Credentials
+        AWS_SESSION_START=$NOW
+        AWS_SESSION_ACCESS_KEY_ID=$(echo "$SESSION" | jq -r .Credentials.AccessKeyId)
+        AWS_SESSION_SECRET_ACCESS_KEY=$(echo "$SESSION" | jq -r .Credentials.SecretAccessKey)
+        AWS_SESSION_SESSION_TOKEN=$(echo "$SESSION" | jq -r .Credentials.SessionToken)
+        AWS_SESSION_SECURITY_TOKEN=$AWS_SESSION_SESSION_TOKEN
+      fi
+
     fi
 
+    # Use the Session in the login account
+    if [ "$ROLE_SESSION_TIMEOUT" -le 3600 ]; then
+      # echo "Setting session vars active"
+      export AWS_ACCESS_KEY_ID=$AWS_SESSION_ACCESS_KEY_ID
+      export AWS_SECRET_ACCESS_KEY=$AWS_SESSION_SECRET_ACCESS_KEY
+      export AWS_SESSION_TOKEN=$AWS_SESSION_SESSION_TOKEN
+      export AWS_SECURITY_TOKEN=$AWS_SESSION_SECURITY_TOKEN
+    fi
   fi
 
-  # Use the Session in the login account
-  if [ "$ROLE_SESSION_TIMEOUT" -le 3600 ]; then
-    # echo "Setting session vars active"
-    export AWS_ACCESS_KEY_ID=$AWS_SESSION_ACCESS_KEY_ID
-    export AWS_SECRET_ACCESS_KEY=$AWS_SESSION_SECRET_ACCESS_KEY
-    export AWS_SESSION_TOKEN=$AWS_SESSION_SESSION_TOKEN
-    export AWS_SECURITY_TOKEN=$AWS_SESSION_SECURITY_TOKEN
+  if use_okta_auth; then
+    export user_clean=$(cat $OKTA_CONFIG | grep okta_username | awk '{ print $3; }')
+    echo_out "${CYAN}Using Okta for assuming ...${NC}"
+  else
+    # TODO set user name from mfa device
+    export user_clean=$(printf '%s' $USER | tr -d '\\')
+    # echo_out "no okta"
   fi
 
   # Now drop into a role using session token's long-lived MFA
   ROLE_SESSION_ARGS=(--role-arn "${role_arn}")
+  if ! use_okta_auth; then
+    ROLE_SESSION_ARGS+=(--profile "${account_name}")
+  fi
   ROLE_SESSION_ARGS+=(--external-id "${external_id}")
   ROLE_SESSION_ARGS+=(--duration-seconds "${ROLE_SESSION_TIMEOUT}")
-  ROLE_SESSION_ARGS+=(--role-session-name "${user_clean}-$(date +%s)")
-
-  if [ "${ROLE_SESSION_TIMEOUT}" -gt 3600 ]; then
-    echo_out "Enforce MFA caused by longer session duration"
-    ROLE_SESSION_ARGS+=(--serial-number "${MFA_DEVICE}")
-    ROLE_SESSION_ARGS+=(--token-code "${mfa_token}")
-  fi
-
+  echo_out "User:${user_clean}"
+  ROLE_SESSION_ARGS+=(--role-session-name "${user_clean}")
   ROLE_SESSION=$(aws sts assume-role "${ROLE_SESSION_ARGS[@]}" --output json || echo "fail")
 
   if [ "$ROLE_SESSION" = "fail" ]; then
-     echo_out "Failed to export session envars."
-     # This will force a new session next time assume-role is run
-     unset AWS_SESSION_START
+    if use_okta_auth; then
+      echo_out "${YELLOW}Failed to export session envars. Executing gimme-aws-creds${NC}"
+      if [ ! -z "$YUBIKEY_OKTA_KEY" ]; then
+        OKTA_MFA_CODE=$(ykman oath code "$YUBIKEY_OKTA_KEY" | awk '{print $NF}')
+        echo_out "Using MFA-Key $YUBIKEY_MFA"
+      export OKTA_MFA_CODE
+      fi
+      
+      gimme-aws-creds
+
+      ROLE_SESSION_ARGS=(--role-arn "${role_arn}")
+      ROLE_SESSION_ARGS+=(--profile "${source_profile_config}")
+      ROLE_SESSION_ARGS+=(--duration-seconds "${ROLE_SESSION_TIMEOUT}")
+      ROLE_SESSION_ARGS+=(--role-session-name "${user_clean}")
+      ROLE_SESSION=$(aws sts assume-role "${ROLE_SESSION_ARGS[@]}" --output json || echo "fail")
+      
+      if [ "$ROLE_SESSION" = "fail" ]; then
+        echo_out "${RED}gimme-aws-creds did not work correctly try it manually${NC}"
+      else
+        export AWS_ACCESS_KEY_ID=$(echo "$ROLE_SESSION" | jq -r .Credentials.AccessKeyId)
+        export AWS_SECRET_ACCESS_KEY=$(echo "$ROLE_SESSION" | jq -r .Credentials.SecretAccessKey)
+        export AWS_SESSION_TOKEN=$(echo "$ROLE_SESSION" | jq -r .Credentials.SessionToken)
+        export AWS_SESSION_END=$(echo "$ROLE_SESSION" | jq -r .Credentials.Expiration)
+        export AWS_SECURITY_TOKEN=$AWS_SESSION_TOKEN
+        export AWS_ACCOUNT_ID="$account_id"
+        export AWS_ACCOUNT_NAME="$account_name"
+        export AWS_ACCOUNT_ROLE="$role"
+        export GEO_ENV="$account_name" # For GeoEngineer https://github.com/coinbase/geoengineer
+        export AWS_STS_ROLE_ARN="$role_arn"
+        echo "${GREEN}\uf65f switched role${NC}"
+      fi
+    else
+      echo_out "${RED}Failed to export session envars.${NC}"
+      unset AWS_SESSION_START
+    fi
   else
-    AWS_ACCESS_KEY_ID=$(echo "$ROLE_SESSION" | jq -r .Credentials.AccessKeyId)
-    AWS_SECRET_ACCESS_KEY=$(echo "$ROLE_SESSION" | jq -r .Credentials.SecretAccessKey)
-    AWS_SESSION_TOKEN=$(echo "$ROLE_SESSION" | jq -r .Credentials.SessionToken)
-    AWS_SESSION_END=$(echo "$ROLE_SESSION" | jq -r .Credentials.Expiration)
-    AWS_SECURITY_TOKEN=$AWS_SESSION_TOKEN
-    AWS_ACCOUNT_ID="$account_id"
-    AWS_ACCOUNT_NAME="$account_name"
-    AWS_ACCOUNT_ROLE="$role"
-    GEO_ENV="$account_name" # For GeoEngineer https://github.com/coinbase/geoengineer
-    AWS_STS_ROLE_ARN="$role_arn"
+    export AWS_ACCESS_KEY_ID=$(echo "$ROLE_SESSION" | jq -r .Credentials.AccessKeyId)
+    export AWS_SECRET_ACCESS_KEY=$(echo "$ROLE_SESSION" | jq -r .Credentials.SecretAccessKey)
+    export AWS_SESSION_TOKEN=$(echo "$ROLE_SESSION" | jq -r .Credentials.SessionToken)
+    export AWS_SESSION_END=$(echo "$ROLE_SESSION" | jq -r .Credentials.Expiration)
+    export AWS_SECURITY_TOKEN=$AWS_SESSION_TOKEN
+    export AWS_ACCOUNT_ID="$account_id"
+    export AWS_ACCOUNT_NAME="$account_name"
+    export AWS_ACCOUNT_ROLE="$role"
+    export GEO_ENV="$account_name" # For GeoEngineer https://github.com/coinbase/geoengineer
+    export AWS_STS_ROLE_ARN="$role_arn"
     # echo_out "Success! IAM session envars are exported."
-    echo "\uf65f switched role"
+    echo "${GREEN}\uf65f switched role${NC}"
   fi
 
   # Switch to EKS Cluster
@@ -392,32 +464,8 @@ EOF
   #count_clusters=$(echo -n "$eks_clusters" | grep -c '^')
   cluster_array=($(echo $eks_clusters | tr "\t" "\n"))
 
-  eks_menu ()
-  {
-    arrsize=$1
-    # echo "Size of array: $arrsize"
-    # echo_out "${@:2}"
-    select option in "${@:2}"; do
-      if [ "$REPLY" -gt "$arrsize" ];
-      then
-        echo_out "Exiting..."
-        break;
-      elif [ 1 -le "$REPLY" ] && [ "$REPLY" -le $((arrsize)) ];
-      then
-        # echo "You selected $option which is option $REPLY"
-        echo_out "\ufd31 Switch to $option"
-        export KUBECONFIG="$HOME/.kube/$AWS_ACCOUNT_ID-$option"
-        aws eks update-kubeconfig --name $option --alias $option
-        chmod 0600 $KUBECONFIG
-        break;
-      else
-        echo_out "Incorrect Input: Select a number 1-$arrsize"
-      fi
-    done
-  }
-
   if [ ${#cluster_array[@]} -eq 1 ]; then
-    echo_out "\ufd31 Switch to $eks_clusters"
+    echo_out "${BLUE}\ufd31 Switch to $eks_clusters${NC}"
     export KUBECONFIG="$HOME/.kube/$AWS_ACCOUNT_ID-$eks_clusters"
     aws eks update-kubeconfig --name $eks_clusters --alias $eks_clusters
     chmod 0600 $KUBECONFIG

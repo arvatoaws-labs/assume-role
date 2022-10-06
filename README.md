@@ -15,18 +15,18 @@ Assume IAM roles through an **AWS Bastion** account with **MFA** via the command
 ### Bash
 
 1. Clone Repository
-2. For easier updates create a symlink from your repository `assume-role` or `assume-role-okta` file to `/usr/local/bin/<assume-role>`
+2. For easier updates create a symlink from your repository `assume-role` file to `/usr/local/bin/assume-role`
    
     **Example**
 
     ```bash
-    ln -s <Git-Repository>/assume-role-okta /usr/local/bin/assume-role-okta
+    ln -s <Git-Repository>/assume-role /usr/local/bin/assume-role
     ```
 
 3. Add execution permissions
    
    ```bash
-   chmod +x <Git-Repository>/assume-role-okta
+   chmod +x <Git-Repository>/assume-role
    ```
 
 
