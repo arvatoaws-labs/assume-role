@@ -34,7 +34,7 @@ assume-role-okta(){
   }
 
   oktasume(){
-    full_output=($(okta-aws-cli -e -b -z | cut -d "=" -f2 ))
+    full_output=($(okta-aws-cli -e -b -z -o $OKTA_ORG_DOMAIN -c $OKTA_OIDC_CLIENT_ID | cut -d "=" -f2 ))
     
     export AWS_ACCESS_KEY_ID=${full_output[1]}
     export AWS_SECRET_ACCESS_KEY=${full_output[2]}
