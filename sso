@@ -70,7 +70,7 @@ sso() {
   fi
   # EKS
   echo "󱃾 Looking up Kubernetes clusters"
-  for REGION in `aws --output json --region eu-central-1 ec2 describe-regions --filters Name=opt-in-status,Values=opt-in-not-required,opted-in | jq --raw-output -c '.Regions[].RegionName'`
+  for REGION in `aws --output json ec2 describe-regions --filters Name=opt-in-status,Values=opt-in-not-required,opted-in | jq --raw-output -c '.Regions[].RegionName'`
   do
     eks_regional_generate &
   done
