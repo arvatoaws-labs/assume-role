@@ -33,6 +33,7 @@ sso() {
   unset AWS_ROLE_NAME
   unset AWS_SESSION_START
   unset PREVIOUS_CONTEXT
+  unset AWS_EKS_USED_REGIONS
 
   export AWS_ROLE_SESSION_NAME="$USER"
   
