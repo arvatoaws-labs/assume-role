@@ -33,7 +33,6 @@ sso() {
   unset AWS_ROLE_NAME
   unset AWS_SESSION_START
   unset PREVIOUS_CONTEXT
-  unset AWS_EKS_USED_REGIONS
 
   export AWS_ROLE_SESSION_NAME="$USER"
   
@@ -72,15 +71,18 @@ sso() {
   # EKS
   echo "󱃾 Looking up Kubernetes clusters"
   if [[ $AWS_REGION == "eusc-de-east-1" ]]; then
-    AWS_EKS_USED_REGIONS="eusc-de-east-1"
+    ACT_AWS_EKS_USED_REGIONS="eusc-de-east-1"
   elif [[ -z $AWS_EKS_USED_REGIONS ]]; then
-    AWS_EKS_USED_REGIONS=$(aws --output json ec2 describe-regions --filters Name=opt-in-status,Values=opt-in-not-required,opted-in | jq --raw-output -c '.Regions[].RegionName')
+    ACT_AWS_EKS_USED_REGIONS=$(aws --output json ec2 describe-regions --filters Name=opt-in-status,Values=opt-in-not-required,opted-in | jq --raw-output -c '.Regions[].RegionName')
+  else
+    ACT_AWS_EKS_USED_REGIONS=$AWS_EKS_USED_REGIONS
   fi
-  for REGION in `echo $AWS_EKS_USED_REGIONS`
+  for REGION in `echo $ACT_AWS_EKS_USED_REGIONS`
   do
     echo "󱃾 Looking up EKS clusters in region $REGION"
     eks_regional_generate &
   done
+  unset ACT_AWS_EKS_USED_REGIONS
   chmod 0600 $KUBECONFIG
   wait
   if [[ ! -z $PREVIOUS_CONTEXT && $PREVIOUS_CONTEXT != "null" ]]; then
