@@ -1,5 +1,6 @@
 #!/bin/bash
 
+AWS_ENV="$HOME/.aws/env"
 export user_clean=$(printf '%s' $USER | tr -d '\\')
 
 # START USAGE DOCUMENTATION
@@ -450,6 +451,32 @@ EOF
     echo "export KUBECONFIG=\"$KUBECONFIG\";"
   fi
 
+  if [ -f "$AWS_ENV" ] ; then
+    rm $AWS_ENV
+  fi
+
+  touch "$AWS_ENV"
+  chmod 600 "$AWS_ENV"
+
+  echo "export AWS_REGION=\"$AWS_REGION\";" >> $AWS_ENV
+  echo "export AWS_DEFAULT_REGION=\"$AWS_DEFAULT_REGION\";" >> $AWS_ENV
+  echo "export AWS_ACCESS_KEY_ID=\"$AWS_ACCESS_KEY_ID\";" >> $AWS_ENV
+  echo "export AWS_SECRET_ACCESS_KEY=\"$AWS_SECRET_ACCESS_KEY\";" >> $AWS_ENV
+  echo "export AWS_SESSION_TOKEN=\"$AWS_SESSION_TOKEN\";" >> $AWS_ENV
+  echo "export AWS_ACCOUNT_ID=\"$AWS_ACCOUNT_ID\";" >> $AWS_ENV
+  echo "export AWS_ACCOUNT_NAME=\"$AWS_ACCOUNT_NAME\";" >> $AWS_ENV
+  echo "export AWS_ACCOUNT_ROLE=\"$AWS_ACCOUNT_ROLE\";" >> $AWS_ENV
+  echo "export AWS_SESSION_ACCESS_KEY_ID=\"$AWS_SESSION_ACCESS_KEY_ID\";" >> $AWS_ENV
+  echo "export AWS_SESSION_SECRET_ACCESS_KEY=\"$AWS_SESSION_SECRET_ACCESS_KEY\";" >> $AWS_ENV
+  echo "export AWS_SESSION_SESSION_TOKEN=\"$AWS_SESSION_SESSION_TOKEN\";" >> $AWS_ENV
+  echo "export AWS_SESSION_SECURITY_TOKEN=\"$AWS_SESSION_SESSION_TOKEN\";" >> $AWS_ENV
+  echo "export AWS_SESSION_START=\"$AWS_SESSION_START\";" >> $AWS_ENV
+  echo "export GEO_ENV=\"$GEO_ENV\";" >> $AWS_ENV
+  echo "export AWS_PROFILE_ASSUME_ROLE=\"$AWS_PROFILE_ASSUME_ROLE\";" >> $AWS_ENV
+  echo "export AWS_SECURITY_TOKEN=\"$AWS_SESSION_TOKEN\";" >> $AWS_ENV
+  echo "export AWS_STS_ROLE_ARN=\"$role_arn\";" >> $AWS_ENV
+  echo "export KUBECONFIG=\"$KUBECONFIG\";" >> $AWS_ENV
+
   # USED FOR TESTING AND DEBUGGING
   if [ "$DEBUG_ASSUME_ROLE" = "true" ]; then
     echo "AWS_CONFIG_REGION=\"$AWS_CONFIG_REGION\";"
@@ -475,7 +502,9 @@ if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
 elif [[ "init" == "${1}" ]]; then
   # TODO: This will be multi-shell support like rbenv, e.g. fish
   # Supports `eval "$(assume-role init -)"` in rc file
-  echo "Currently not supported"
+  if [ -f "$AWS_ENV" ] ; then
+    cat $AWS_ENV
+  fi
 else
   # The script is being called directly
   # Supports calling being called like eval $(assume-role account role [token])
