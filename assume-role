@@ -35,6 +35,7 @@ redis-cli(){
 }
 
 start-redis(){
+  [ -n "$ASSUME_ROLE_REDIS" ] || return 0
   if ! docker volume inspect assume-role-redis-volume >/dev/null 2>&1
   then docker volume create assume-role-redis-volume >/dev/null 2>&1
   fi
@@ -51,6 +52,7 @@ start-redis(){
 }
 
 set-redis() {
+  [ -n "$ASSUME_ROLE_REDIS" ] || return 0
   if [ "$#" -lt "2" ] ; then
     return
   fi
@@ -77,6 +79,11 @@ assume-role(){
   fi
 
   start-redis
+
+  # reuse saved 12h MFA session when the shell started clean (avoids re-prompting MFA)
+  if [ -z "$AWS_SESSION_START" ] && [ -r "$AWS_ENV" ]; then
+    . "$AWS_ENV"
+  fi
 
   #######
   # SCRIPT VARIABLES
@@ -475,6 +482,7 @@ EOF
     echo "export AWS_SESSION_SESSION_TOKEN=\"$AWS_SESSION_SESSION_TOKEN\";"
     echo "export AWS_SESSION_SECURITY_TOKEN=\"$AWS_SESSION_SESSION_TOKEN\";"
     echo "export AWS_SESSION_START=\"$AWS_SESSION_START\";"
+    echo "export AWS_SESSION_END=\"$AWS_SESSION_END\";"
     echo "export GEO_ENV=\"$GEO_ENV\";"
     echo "export AWS_PROFILE_ASSUME_ROLE=\"$AWS_PROFILE_ASSUME_ROLE\";"
     echo "export AWS_SECURITY_TOKEN=\"$AWS_SESSION_TOKEN\";"
@@ -502,6 +510,7 @@ EOF
   echo "export AWS_SESSION_SESSION_TOKEN=\"$AWS_SESSION_SESSION_TOKEN\";" >> $AWS_ENV
   echo "export AWS_SESSION_SECURITY_TOKEN=\"$AWS_SESSION_SESSION_TOKEN\";" >> $AWS_ENV
   echo "export AWS_SESSION_START=\"$AWS_SESSION_START\";" >> $AWS_ENV
+  echo "export AWS_SESSION_END=\"$AWS_SESSION_END\";" >> $AWS_ENV
   echo "export GEO_ENV=\"$GEO_ENV\";" >> $AWS_ENV
   echo "export AWS_PROFILE_ASSUME_ROLE=\"$AWS_PROFILE_ASSUME_ROLE\";" >> $AWS_ENV
   echo "export AWS_SECURITY_TOKEN=\"$AWS_SESSION_TOKEN\";" >> $AWS_ENV
@@ -541,6 +550,17 @@ EOF
   set-redis "${AWS_ACCOUNT_NAME}:AWS_PROFILE_ASSUME_ROLE" $AWS_PROFILE_ASSUME_ROLE
   set-redis "${AWS_ACCOUNT_NAME}:AWS_SECURITY_TOKEN" $AWS_SESSION_TOKEN
   set-redis "${AWS_ACCOUNT_NAME}:AWS_STS_ROLE_ARN" $role_arn
+}
+
+assume-role-logout(){
+  # clear assume-role's session variables from the current shell (to use another account or profile)
+  # keeps AWS_PROFILE_ASSUME_ROLE (your bastion default) and ~/.aws/env (so re-assuming skips MFA)
+  unset AWS_REGION AWS_DEFAULT_REGION \
+        AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_SECURITY_TOKEN \
+        AWS_ACCOUNT_ID AWS_ACCOUNT_NAME AWS_ACCOUNT_ROLE AWS_STS_ROLE_ARN GEO_ENV \
+        AWS_SESSION_ACCESS_KEY_ID AWS_SESSION_SECRET_ACCESS_KEY \
+        AWS_SESSION_SESSION_TOKEN AWS_SESSION_SECURITY_TOKEN \
+        AWS_SESSION_START AWS_SESSION_END KUBECONFIG
 }
 
 # from https://stackoverflow.com/questions/2683279/how-to-detect-if-a-script-is-being-sourced

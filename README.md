@@ -115,6 +115,69 @@ However, be aware that for [chained roles](https://docs.aws.amazon.com/IAM/lates
 
 > DurationSeconds exceeds the 1 hour session limit for roles assumed by role chaining.
 
+## Shell integration (bash)
+
+For the smoothest experience, load `assume-role` as a shell **function** in your `~/.bashrc` (bash) or
+`~/.zshrc` (zsh). As a function it exports credentials into your current shell, and it can restore your
+last session in new shells — but only while those credentials are still valid, so it never gets in the
+way of using other accounts.
+
+Add this to `~/.bashrc`:
+
+```bash
+# assume-role
+source "$(which assume-role)"                        # define the assume-role function
+# restore the last assumed session only while its credentials are still valid
+if [ -r "$HOME/.aws/env" ]; then
+  __ar_exp=$( . "$HOME/.aws/env" >/dev/null 2>&1; printf '%s' "$AWS_SESSION_END" )
+  if [ -n "$__ar_exp" ] && \
+     [ "$(date -d "$__ar_exp" +%s 2>/dev/null || echo 0)" -gt "$(date +%s)" ]; then
+    . "$HOME/.aws/env"
+  fi
+  unset __ar_exp
+fi
+```
+
+What this gives you:
+
+- **New shells inherit your session only while it is valid.** Once the role credentials expire, new
+  shells start clean, so `AWS_PROFILE` / `aws --profile <other>` for other accounts works without
+  interference. (Uses GNU `date`; on macOS install coreutils and use `gdate`.)
+- **Running `assume-role` reuses your login.** Even from a clean shell, `assume-role <account>` reloads
+  the saved session and reuses your 12h MFA session, so you are not asked for MFA again until it
+  actually expires.
+
+The credentials of the last assumed session are stored in `~/.aws/env` (mode `600`).
+
+### Switching accounts / logging out
+
+To switch to another **assume-role** account you don't need to log out first — just run
+`assume-role <other-account>`, which replaces the current session in place.
+
+To step out of assume-role entirely — e.g. to use a different account through a named profile — clear
+its variables from the current shell:
+
+```bash
+assume-role-logout
+```
+
+This unsets the AWS variables `assume-role` set (credentials, region, account, `KUBECONFIG`, …) in the
+current shell, so `AWS_PROFILE` / `aws --profile <other>` takes over. Your `AWS_PROFILE_ASSUME_ROLE`
+bastion default is kept, and so is `~/.aws/env`, so a later `assume-role <account>` still reuses your
+12h MFA session without a new MFA prompt. To forget the saved session completely (next login re-prompts
+MFA), also remove the file: `rm ~/.aws/env`.
+
+### Redis (optional)
+
+`assume-role` can mirror each account's credentials into a local `redis` container for external
+tooling. This is **off by default** and needs Docker only when enabled. Turn it on by setting
+`ASSUME_ROLE_REDIS` to any non-empty value:
+
+```bash
+export ASSUME_ROLE_REDIS=1            # in your rc, or per command:
+ASSUME_ROLE_REDIS=1 assume-role production read
+```
+
 ## AWS Bastion Account Setup
 
 Here is a simple example of how to set up a **Bastion** AWS account with an id `0987654321098` and a **Production** account with the id `123456789012`.
