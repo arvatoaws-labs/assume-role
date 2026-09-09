@@ -178,6 +178,10 @@ export ASSUME_ROLE_REDIS=1            # in your rc, or per command:
 ASSUME_ROLE_REDIS=1 assume-role production read
 ```
 
+When enabled, the container starts on demand — only after a successful role assumption — and runs with
+`--restart no`, so it does not come back on its own after a Docker or machine restart. It stays up for
+the session and is started again the next time you assume a role.
+
 ## AWS Bastion Account Setup
 
 Here is a simple example of how to set up a **Bastion** AWS account with an id `0987654321098` and a **Production** account with the id `123456789012`.

@@ -1,105 +1,97 @@
-# Restore assumed-role env only while valid — or when running `assume-role`
+# Start redis on demand, only after a successful role assumption
 
 ## Context
 
-The user has multiple AWS accounts. Their bashrc runs `eval "$(assume-role init -)"`, sourcing
-`~/.aws/env` into **every** shell, which exports static `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`
-/ `AWS_SESSION_TOKEN`. Env creds outrank `AWS_PROFILE`, so a stale/expired saved session blocks other
-accounts and throws `ExpiredToken`.
+Two problems with redis today:
+1. The container was created with `--restart always`, so Docker auto-restarts it on every daemon/WSL
+   start — it runs even when `assume-role` hasn't been used for days.
+2. `start-redis` is called at the very top of `assume-role` (line 81), before any credentials exist —
+   so it starts even when the run has no valid AWS credentials (a failed or aborted assume).
 
-Goal: a new shell restores the saved session **only while its (~1h) role credentials are still
-valid**; otherwise it stays clean so profiles for other accounts work. BUT — `assume-role` reuses the
-12h MFA session by reading `AWS_SESSION_START` and `AWS_SESSION_ACCESS_KEY_ID/SECRET/SESSION_TOKEN`
-from the environment (lines 309-316, 355-378). If a clean shell drops those, running `assume-role`
-would re-prompt MFA even though the 12h session is alive. So we also load `~/.aws/env` **when
-`assume-role` is executed**, recovering the session without re-MFA. That load affects only the shell
-that ran `assume-role`, so it doesn't reintroduce the multi-account problem.
+Goal: redis (still opt-in via `ASSUME_ROLE_REDIS`) starts only when we actually obtained valid
+credentials, comes up on demand, and never auto-restarts on boot. The old container/network/volume were
+already removed by the user, so `start-redis` recreates them fresh on the next successful opt-in run.
 
-Validity is judged by the role creds' real expiry `AWS_SESSION_END` (STS `.Credentials.Expiration`,
-set at line 415), not the coarse 12h `AWS_SESSION_START` — so it must be persisted first.
+"Valid credentials" = the role assumption succeeded, i.e. `ROLE_SESSION != "fail"` (set at line 408).
 
-## Change 1 — persist `AWS_SESSION_END` (`assume-role`) — DONE
+## Change 1 — `start-redis()`: on-demand policy + start a stopped container
 
-Already applied to the working tree: `AWS_SESSION_END` is now written right after `AWS_SESSION_START`
-in both mirrored export blocks — the eval-output block and the `~/.aws/env` file-write block.
-
-## Change 2 — reuse the saved session when running `assume-role` (`assume-role`)
-
-Immediately after the `start-redis` call (line 81), before the credential unset at lines 170-173, add:
-
+Container-exists block (lines 47-49):
 ```bash
+  if docker container inspect assume-role-redis >/dev/null 2>&1
+  then return
+  fi
+```
+becomes (start it if it exists but is stopped; `docker start` on a running container is a no-op):
+```bash
+  if docker container inspect assume-role-redis >/dev/null 2>&1
+  then docker start assume-role-redis >/dev/null 2>&1; return
+  fi
+```
+
+`docker run` line 51 — change `--restart always` to `--restart no`:
+```bash
+  docker run --name assume-role-redis --network assume-role-redis-network -v "assume-role-redis-volume:/data" --restart no -d redis:7.2 redis-server --notify-keyspace-events KEA >/dev/null 2>&1
+```
+
+## Change 2 — `assume-role()`: remove the early start (line 81)
+
+Delete the `start-redis` call (and its trailing blank line) that sits right after the `aws` precondition
+check, keeping the session-reuse block that follows it:
+```bash
+  fi
+
+  start-redis          # <-- remove this line
+
   # reuse saved 12h MFA session when the shell started clean (avoids re-prompting MFA)
-  if [ -z "$AWS_SESSION_START" ] && [ -r "$AWS_ENV" ]; then
-    . "$AWS_ENV"
+```
+
+## Change 3 — `assume-role()`: start + write redis only on success
+
+Wrap the `set-redis` block (lines 536-552) in a success guard and run `start-redis` inside it, so redis
+is started and written only when we have valid credentials (indent the 17 `set-redis` lines by two
+spaces):
+```bash
+  # store the session in redis (opt-in) only after a successful role assumption
+  if [ "$ROLE_SESSION" != "fail" ]; then
+    start-redis
+    set-redis "${AWS_ACCOUNT_NAME}:AWS_REGION" $AWS_REGION
+    # … the remaining 16 set-redis lines, unchanged except indentation …
+    set-redis "${AWS_ACCOUNT_NAME}:AWS_STS_ROLE_ARN" $role_arn
   fi
 ```
+On a failed assume (`ROLE_SESSION == "fail"`), redis is neither started nor written — which also avoids
+`docker exec` errors against a container that was never started.
 
-- Guard `[ -z "$AWS_SESSION_START" ]`: only recover when the shell has no session in env (i.e. bashrc
-  didn't restore it because the role creds had expired). If a valid session is already loaded, leave
-  it untouched.
-- `$AWS_ENV` is the global `$HOME/.aws/env` (line 3). Sourcing also sets the expired 1h keys, but the
-  existing unset at lines 170-173 clears them next, keeping the 12h `AWS_SESSION_*` state — exactly
-  what the session-reuse logic needs.
-- Minor side effect: with no account arg, `DEFAULT_ACCOUNT` then defaults to the last account
-  (`AWS_ACCOUNT_NAME`, line 193-195) — benign, arguably convenient.
-
-## Change 3 — conditional restore (`~/.bashrc`, lines 137-139)
-
-Replace:
-```bash
-# assume-role for VNR AWS
-eval "$(assume-role init -)"
-source $(which assume-role)
-```
-with:
-```bash
-# assume-role for VNR AWS
-source "$(which assume-role)"                        # define the assume-role function (no docker)
-# restore the last assumed session only while its credentials are still valid
-if [ -r "$HOME/.aws/env" ]; then
-  __ar_exp=$( . "$HOME/.aws/env" >/dev/null 2>&1; printf '%s' "$AWS_SESSION_END" )
-  if [ -n "$__ar_exp" ] && \
-     [ "$(date -d "$__ar_exp" +%s 2>/dev/null || echo 0)" -gt "$(date +%s)" ]; then
-    . "$HOME/.aws/env"
-  fi
-  unset __ar_exp
-fi
-```
-- Reads `AWS_SESSION_END` in a throwaway subshell (no pollution); sources into the real shell only
-  when the expiry is in the future. Assumes GNU `date` (user's shell is WSL/Linux).
-- Drops `eval "$(assume-role init -)"`: redis is already gated off, and its env-restore is now this
-  conditional source. Expired/missing/unparseable expiry → clean shell → other accounts usable.
-- Edit by Reading `~/.bashrc` and replacing exactly lines 137-139.
+The explicit `assume-role start-redis` and `init` subcommands (lines 572, 576) are unchanged — those are
+deliberate manual invocations and still honor the `ASSUME_ROLE_REDIS` flag via `start-redis` itself.
 
 ## Verification
 
-1. Script syntax: `bash -n assume-role` → clean.
-2. Change 3 (bashrc) offline — future vs past expiry sources vs skips:
+1. Syntax: `bash -n assume-role` → clean.
+2. Offline with a docker stub logging calls; drive `start-redis` and the success guard directly:
    ```bash
-   d="$CLAUDE_JOB_DIR/tmp"
-   printf 'export AWS_ACCESS_KEY_ID="LIVE";\nexport AWS_SESSION_END="%s";\n' \
-     "$(date -d '+30 min' --iso-8601=seconds)" > "$d/env.future"
-   printf 'export AWS_ACCESS_KEY_ID="DEAD";\nexport AWS_SESSION_END="%s";\n' \
-     "$(date -d '-30 min' --iso-8601=seconds)" > "$d/env.past"
-   for f in future past; do
-     ( AWSENV="$d/env.$f"
-       __ar_exp=$( . "$AWSENV" >/dev/null 2>&1; printf '%s' "$AWS_SESSION_END" )
-       if [ -n "$__ar_exp" ] && [ "$(date -d "$__ar_exp" +%s 2>/dev/null||echo 0)" -gt "$(date +%s)" ]
-       then . "$AWSENV"; fi
-       echo "$f -> AWS_ACCESS_KEY_ID='${AWS_ACCESS_KEY_ID:-<unset>}'" )
-   done
+   d="$CLAUDE_JOB_DIR/tmp"; export probe="$d/calls.log"
+   # a) create path uses --restart no
+   : > "$probe"
+   ( source ./assume-role; export ASSUME_ROLE_REDIS=1
+     docker(){ echo "docker $*" >> "$probe"; [ "$1 $2" = "container inspect" ] && return 1; return 0; }
+     start-redis )
+   grep -q -- '--restart no' "$probe" && ! grep -q -- '--restart always' "$probe" && echo "OK: --restart no"
+   # b) existing container is started
+   : > "$probe"
+   ( source ./assume-role; export ASSUME_ROLE_REDIS=1
+     docker(){ echo "docker $*" >> "$probe"; return 0; }
+     start-redis )
+   grep -q '^docker start assume-role-redis' "$probe" && echo "OK: starts existing container"
+   # c) failed assume -> redis never touched
+   : > "$probe"
+   ( source ./assume-role; export ASSUME_ROLE_REDIS=1; ROLE_SESSION=fail
+     docker(){ echo "docker $*" >> "$probe"; return 0; }
+     [ "$ROLE_SESSION" != "fail" ] && start-redis
+     [ -s "$probe" ] && echo "FAIL: docker called" || echo "OK: no docker on failed assume" )
    ```
-   Expect: `future -> …='LIVE'`, `past -> …='<unset>'`.
-3. Change 2 (function reload guard) offline — with a fake env file:
-   ```bash
-   d="$CLAUDE_JOB_DIR/tmp"; printf 'export AWS_SESSION_START="12345";\n' > "$d/env.sess"
-   ( AWS_ENV="$d/env.sess"; unset AWS_SESSION_START
-     [ -z "$AWS_SESSION_START" ] && [ -r "$AWS_ENV" ] && . "$AWS_ENV"
-     echo "clean shell -> AWS_SESSION_START='${AWS_SESSION_START:-<unset>}'" )   # expect 12345
-   ( AWS_ENV="$d/env.sess"; AWS_SESSION_START=99999
-     [ -z "$AWS_SESSION_START" ] && [ -r "$AWS_ENV" ] && . "$AWS_ENV"
-     echo "loaded shell -> AWS_SESSION_START='$AWS_SESSION_START'" )             # expect 99999 (skip)
-   ```
-4. End-to-end: `assume-role <acct>` (sourced), `grep AWS_SESSION_END ~/.aws/env` shows the expiry;
-   new shell within ~1h has creds; edit that timestamp to the past → new shell clean, `AWS_PROFILE`
-   works; then `assume-role <acct>` in that clean shell reuses the 12h session with no MFA prompt.
+3. End-to-end: `ASSUME_ROLE_REDIS=1 assume-role <acct>` → container created with
+   `docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' assume-role-redis` = `no`; after a WSL/Docker
+   restart it is `exited` and stays down; the next `ASSUME_ROLE_REDIS=1 assume-role <acct>` starts it. A
+   run that fails to assume leaves no redis container.

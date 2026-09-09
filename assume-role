@@ -45,10 +45,10 @@ start-redis(){
   fi
 
   if docker container inspect assume-role-redis >/dev/null 2>&1
-  then return
+  then docker start assume-role-redis >/dev/null 2>&1; return
   fi
 
-  docker run --name assume-role-redis --network assume-role-redis-network -v "assume-role-redis-volume:/data" --restart always -d redis:7.2 redis-server --notify-keyspace-events KEA >/dev/null 2>&1
+  docker run --name assume-role-redis --network assume-role-redis-network -v "assume-role-redis-volume:/data" --restart no -d redis:7.2 redis-server --notify-keyspace-events KEA >/dev/null 2>&1
 }
 
 set-redis() {
@@ -77,8 +77,6 @@ assume-role(){
     echo_out "assume-role requires 'aws' to be installed"
     return
   fi
-
-  start-redis
 
   # reuse saved 12h MFA session when the shell started clean (avoids re-prompting MFA)
   if [ -z "$AWS_SESSION_START" ] && [ -r "$AWS_ENV" ]; then
@@ -533,23 +531,27 @@ EOF
     echo "AWS_STS_ROLE_ARN=\"$role_arn\";"
   fi
 
-  set-redis "${AWS_ACCOUNT_NAME}:AWS_REGION" $AWS_REGION
-  set-redis "${AWS_ACCOUNT_NAME}:AWS_DEFAULT_REGION" $AWS_DEFAULT_REGION
-  set-redis "${AWS_ACCOUNT_NAME}:AWS_ACCESS_KEY_ID" $AWS_ACCESS_KEY_ID
-  set-redis "${AWS_ACCOUNT_NAME}:AWS_SECRET_ACCESS_KEY" $AWS_SECRET_ACCESS_KEY
-  set-redis "${AWS_ACCOUNT_NAME}:AWS_SESSION_TOKEN" $AWS_SESSION_TOKEN
-  set-redis "${AWS_ACCOUNT_NAME}:AWS_ACCOUNT_ID" $AWS_ACCOUNT_ID
-  set-redis "${AWS_ACCOUNT_NAME}:AWS_ACCOUNT_NAME" $AWS_ACCOUNT_NAME
-  set-redis "${AWS_ACCOUNT_NAME}:AWS_ACCOUNT_ROLE" $AWS_ACCOUNT_ROLE
-  set-redis "${AWS_ACCOUNT_NAME}:AWS_SESSION_ACCESS_KEY_ID" $AWS_SESSION_ACCESS_KEY_ID
-  set-redis "${AWS_ACCOUNT_NAME}:AWS_SESSION_SECRET_ACCESS_KEY" $AWS_SESSION_SECRET_ACCESS_KEY
-  set-redis "${AWS_ACCOUNT_NAME}:AWS_SESSION_SESSION_TOKEN" $AWS_SESSION_SESSION_TOKEN
-  set-redis "${AWS_ACCOUNT_NAME}:AWS_SESSION_SECURITY_TOKEN" $AWS_SESSION_SESSION_TOKEN
-  set-redis "${AWS_ACCOUNT_NAME}:AWS_SESSION_START" $AWS_SESSION_START
-  set-redis "${AWS_ACCOUNT_NAME}:GEO_ENV" $GEO_ENV
-  set-redis "${AWS_ACCOUNT_NAME}:AWS_PROFILE_ASSUME_ROLE" $AWS_PROFILE_ASSUME_ROLE
-  set-redis "${AWS_ACCOUNT_NAME}:AWS_SECURITY_TOKEN" $AWS_SESSION_TOKEN
-  set-redis "${AWS_ACCOUNT_NAME}:AWS_STS_ROLE_ARN" $role_arn
+  # store the session in redis (opt-in) only after a successful role assumption
+  if [ "$ROLE_SESSION" != "fail" ]; then
+    start-redis
+    set-redis "${AWS_ACCOUNT_NAME}:AWS_REGION" $AWS_REGION
+    set-redis "${AWS_ACCOUNT_NAME}:AWS_DEFAULT_REGION" $AWS_DEFAULT_REGION
+    set-redis "${AWS_ACCOUNT_NAME}:AWS_ACCESS_KEY_ID" $AWS_ACCESS_KEY_ID
+    set-redis "${AWS_ACCOUNT_NAME}:AWS_SECRET_ACCESS_KEY" $AWS_SECRET_ACCESS_KEY
+    set-redis "${AWS_ACCOUNT_NAME}:AWS_SESSION_TOKEN" $AWS_SESSION_TOKEN
+    set-redis "${AWS_ACCOUNT_NAME}:AWS_ACCOUNT_ID" $AWS_ACCOUNT_ID
+    set-redis "${AWS_ACCOUNT_NAME}:AWS_ACCOUNT_NAME" $AWS_ACCOUNT_NAME
+    set-redis "${AWS_ACCOUNT_NAME}:AWS_ACCOUNT_ROLE" $AWS_ACCOUNT_ROLE
+    set-redis "${AWS_ACCOUNT_NAME}:AWS_SESSION_ACCESS_KEY_ID" $AWS_SESSION_ACCESS_KEY_ID
+    set-redis "${AWS_ACCOUNT_NAME}:AWS_SESSION_SECRET_ACCESS_KEY" $AWS_SESSION_SECRET_ACCESS_KEY
+    set-redis "${AWS_ACCOUNT_NAME}:AWS_SESSION_SESSION_TOKEN" $AWS_SESSION_SESSION_TOKEN
+    set-redis "${AWS_ACCOUNT_NAME}:AWS_SESSION_SECURITY_TOKEN" $AWS_SESSION_SESSION_TOKEN
+    set-redis "${AWS_ACCOUNT_NAME}:AWS_SESSION_START" $AWS_SESSION_START
+    set-redis "${AWS_ACCOUNT_NAME}:GEO_ENV" $GEO_ENV
+    set-redis "${AWS_ACCOUNT_NAME}:AWS_PROFILE_ASSUME_ROLE" $AWS_PROFILE_ASSUME_ROLE
+    set-redis "${AWS_ACCOUNT_NAME}:AWS_SECURITY_TOKEN" $AWS_SESSION_TOKEN
+    set-redis "${AWS_ACCOUNT_NAME}:AWS_STS_ROLE_ARN" $role_arn
+  fi
 }
 
 assume-role-logout(){
