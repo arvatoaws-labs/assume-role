@@ -70,10 +70,19 @@ sso() {
   fi
   # EKS
   echo "󱃾 Looking up Kubernetes clusters"
-  for REGION in `aws --output json ec2 describe-regions --filters Name=opt-in-status,Values=opt-in-not-required,opted-in | jq --raw-output -c '.Regions[].RegionName'`
+  if [[ $AWS_REGION == "eusc-de-east-1" ]]; then
+    ACT_AWS_EKS_USED_REGIONS="eusc-de-east-1"
+  elif [[ -z $AWS_EKS_USED_REGIONS ]]; then
+    ACT_AWS_EKS_USED_REGIONS=$(aws --output json ec2 describe-regions --filters Name=opt-in-status,Values=opt-in-not-required,opted-in | jq --raw-output -c '.Regions[].RegionName')
+  else
+    ACT_AWS_EKS_USED_REGIONS=$AWS_EKS_USED_REGIONS
+  fi
+  for REGION in `echo $ACT_AWS_EKS_USED_REGIONS`
   do
+    echo "󱃾 Looking up EKS clusters in region $REGION"
     eks_regional_generate &
   done
+  unset ACT_AWS_EKS_USED_REGIONS
   chmod 0600 $KUBECONFIG
   wait
   if [[ ! -z $PREVIOUS_CONTEXT && $PREVIOUS_CONTEXT != "null" ]]; then
