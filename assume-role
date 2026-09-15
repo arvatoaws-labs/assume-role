@@ -1,5 +1,6 @@
 #!/bin/bash
 
+AWS_ENV="$HOME/.aws/env"
 export user_clean=$(printf '%s' $USER | tr -d '\\')
 
 # START USAGE DOCUMENTATION
@@ -29,6 +30,37 @@ echo_out() {
   fi
 }
 
+redis-cli(){
+  docker exec assume-role-redis redis-cli "$@" 2>&1 > /dev/null
+}
+
+start-redis(){
+  [ -n "$ASSUME_ROLE_REDIS" ] || return 0
+  if ! docker volume inspect assume-role-redis-volume >/dev/null 2>&1
+  then docker volume create assume-role-redis-volume >/dev/null 2>&1
+  fi
+
+  if ! docker network inspect assume-role-redis-network >/dev/null 2>&1
+  then docker network create assume-role-redis-network >/dev/null 2>&1
+  fi
+
+  if docker container inspect assume-role-redis >/dev/null 2>&1
+  then docker start assume-role-redis >/dev/null 2>&1; return
+  fi
+
+  docker run --name assume-role-redis --network assume-role-redis-network -v "assume-role-redis-volume:/data" --restart no -d redis:7.2 redis-server --notify-keyspace-events KEA >/dev/null 2>&1
+}
+
+set-redis() {
+  [ -n "$ASSUME_ROLE_REDIS" ] || return 0
+  if [ "$#" -lt "2" ] ; then
+    return
+  fi
+
+  redis-cli SET "$@"
+}
+
+
 assume-role(){
   #######
   # PRE-CONDITIONS
@@ -44,6 +76,11 @@ assume-role(){
   if ! hash aws 2>/dev/null; then
     echo_out "assume-role requires 'aws' to be installed"
     return
+  fi
+
+  # reuse saved 12h MFA session when the shell started clean (avoids re-prompting MFA)
+  if [ -z "$AWS_SESSION_START" ] && [ -r "$AWS_ENV" ]; then
+    . "$AWS_ENV"
   fi
 
   #######
@@ -443,12 +480,40 @@ EOF
     echo "export AWS_SESSION_SESSION_TOKEN=\"$AWS_SESSION_SESSION_TOKEN\";"
     echo "export AWS_SESSION_SECURITY_TOKEN=\"$AWS_SESSION_SESSION_TOKEN\";"
     echo "export AWS_SESSION_START=\"$AWS_SESSION_START\";"
+    echo "export AWS_SESSION_END=\"$AWS_SESSION_END\";"
     echo "export GEO_ENV=\"$GEO_ENV\";"
     echo "export AWS_PROFILE_ASSUME_ROLE=\"$AWS_PROFILE_ASSUME_ROLE\";"
     echo "export AWS_SECURITY_TOKEN=\"$AWS_SESSION_TOKEN\";"
     echo "export AWS_STS_ROLE_ARN=\"$role_arn\";"
     echo "export KUBECONFIG=\"$KUBECONFIG\";"
   fi
+
+  if [ -f "$AWS_ENV" ] ; then
+    rm $AWS_ENV
+  fi
+
+  touch "$AWS_ENV"
+  chmod 600 "$AWS_ENV"
+
+  echo "export AWS_REGION=\"$AWS_REGION\";" >> $AWS_ENV
+  echo "export AWS_DEFAULT_REGION=\"$AWS_DEFAULT_REGION\";" >> $AWS_ENV
+  echo "export AWS_ACCESS_KEY_ID=\"$AWS_ACCESS_KEY_ID\";" >> $AWS_ENV
+  echo "export AWS_SECRET_ACCESS_KEY=\"$AWS_SECRET_ACCESS_KEY\";" >> $AWS_ENV
+  echo "export AWS_SESSION_TOKEN=\"$AWS_SESSION_TOKEN\";" >> $AWS_ENV
+  echo "export AWS_ACCOUNT_ID=\"$AWS_ACCOUNT_ID\";" >> $AWS_ENV
+  echo "export AWS_ACCOUNT_NAME=\"$AWS_ACCOUNT_NAME\";" >> $AWS_ENV
+  echo "export AWS_ACCOUNT_ROLE=\"$AWS_ACCOUNT_ROLE\";" >> $AWS_ENV
+  echo "export AWS_SESSION_ACCESS_KEY_ID=\"$AWS_SESSION_ACCESS_KEY_ID\";" >> $AWS_ENV
+  echo "export AWS_SESSION_SECRET_ACCESS_KEY=\"$AWS_SESSION_SECRET_ACCESS_KEY\";" >> $AWS_ENV
+  echo "export AWS_SESSION_SESSION_TOKEN=\"$AWS_SESSION_SESSION_TOKEN\";" >> $AWS_ENV
+  echo "export AWS_SESSION_SECURITY_TOKEN=\"$AWS_SESSION_SESSION_TOKEN\";" >> $AWS_ENV
+  echo "export AWS_SESSION_START=\"$AWS_SESSION_START\";" >> $AWS_ENV
+  echo "export AWS_SESSION_END=\"$AWS_SESSION_END\";" >> $AWS_ENV
+  echo "export GEO_ENV=\"$GEO_ENV\";" >> $AWS_ENV
+  echo "export AWS_PROFILE_ASSUME_ROLE=\"$AWS_PROFILE_ASSUME_ROLE\";" >> $AWS_ENV
+  echo "export AWS_SECURITY_TOKEN=\"$AWS_SESSION_TOKEN\";" >> $AWS_ENV
+  echo "export AWS_STS_ROLE_ARN=\"$role_arn\";" >> $AWS_ENV
+  echo "export KUBECONFIG=\"$KUBECONFIG\";" >> $AWS_ENV
 
   # USED FOR TESTING AND DEBUGGING
   if [ "$DEBUG_ASSUME_ROLE" = "true" ]; then
@@ -465,6 +530,39 @@ EOF
     echo "AWS_PROFILE_ASSUME_ROLE=\"$AWS_PROFILE_ASSUME_ROLE\";"
     echo "AWS_STS_ROLE_ARN=\"$role_arn\";"
   fi
+
+  # store the session in redis (opt-in) only after a successful role assumption
+  if [ "$ROLE_SESSION" != "fail" ]; then
+    start-redis
+    set-redis "${AWS_ACCOUNT_NAME}:AWS_REGION" $AWS_REGION
+    set-redis "${AWS_ACCOUNT_NAME}:AWS_DEFAULT_REGION" $AWS_DEFAULT_REGION
+    set-redis "${AWS_ACCOUNT_NAME}:AWS_ACCESS_KEY_ID" $AWS_ACCESS_KEY_ID
+    set-redis "${AWS_ACCOUNT_NAME}:AWS_SECRET_ACCESS_KEY" $AWS_SECRET_ACCESS_KEY
+    set-redis "${AWS_ACCOUNT_NAME}:AWS_SESSION_TOKEN" $AWS_SESSION_TOKEN
+    set-redis "${AWS_ACCOUNT_NAME}:AWS_ACCOUNT_ID" $AWS_ACCOUNT_ID
+    set-redis "${AWS_ACCOUNT_NAME}:AWS_ACCOUNT_NAME" $AWS_ACCOUNT_NAME
+    set-redis "${AWS_ACCOUNT_NAME}:AWS_ACCOUNT_ROLE" $AWS_ACCOUNT_ROLE
+    set-redis "${AWS_ACCOUNT_NAME}:AWS_SESSION_ACCESS_KEY_ID" $AWS_SESSION_ACCESS_KEY_ID
+    set-redis "${AWS_ACCOUNT_NAME}:AWS_SESSION_SECRET_ACCESS_KEY" $AWS_SESSION_SECRET_ACCESS_KEY
+    set-redis "${AWS_ACCOUNT_NAME}:AWS_SESSION_SESSION_TOKEN" $AWS_SESSION_SESSION_TOKEN
+    set-redis "${AWS_ACCOUNT_NAME}:AWS_SESSION_SECURITY_TOKEN" $AWS_SESSION_SESSION_TOKEN
+    set-redis "${AWS_ACCOUNT_NAME}:AWS_SESSION_START" $AWS_SESSION_START
+    set-redis "${AWS_ACCOUNT_NAME}:GEO_ENV" $GEO_ENV
+    set-redis "${AWS_ACCOUNT_NAME}:AWS_PROFILE_ASSUME_ROLE" $AWS_PROFILE_ASSUME_ROLE
+    set-redis "${AWS_ACCOUNT_NAME}:AWS_SECURITY_TOKEN" $AWS_SESSION_TOKEN
+    set-redis "${AWS_ACCOUNT_NAME}:AWS_STS_ROLE_ARN" $role_arn
+  fi
+}
+
+assume-role-logout(){
+  # clear assume-role's session variables from the current shell (to use another account or profile)
+  # keeps AWS_PROFILE_ASSUME_ROLE (your bastion default) and ~/.aws/env (so re-assuming skips MFA)
+  unset AWS_REGION AWS_DEFAULT_REGION \
+        AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_SECURITY_TOKEN \
+        AWS_ACCOUNT_ID AWS_ACCOUNT_NAME AWS_ACCOUNT_ROLE AWS_STS_ROLE_ARN GEO_ENV \
+        AWS_SESSION_ACCESS_KEY_ID AWS_SESSION_SECRET_ACCESS_KEY \
+        AWS_SESSION_SESSION_TOKEN AWS_SESSION_SECURITY_TOKEN \
+        AWS_SESSION_START AWS_SESSION_END KUBECONFIG
 }
 
 # from https://stackoverflow.com/questions/2683279/how-to-detect-if-a-script-is-being-sourced
@@ -472,10 +570,15 @@ if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
   # If the script is being sourced, do nothing
   # Supports `source $(which assume_role)` in rc file for bash and zsh
   : # noop
+elif [[ "start-redis" == "${1}" ]]; then
+  start-redis
 elif [[ "init" == "${1}" ]]; then
   # TODO: This will be multi-shell support like rbenv, e.g. fish
   # Supports `eval "$(assume-role init -)"` in rc file
-  echo "Currently not supported"
+  start-redis
+  if [ -f "$AWS_ENV" ] ; then
+    cat $AWS_ENV
+  fi
 else
   # The script is being called directly
   # Supports calling being called like eval $(assume-role account role [token])
